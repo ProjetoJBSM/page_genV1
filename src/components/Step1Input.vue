@@ -1,0 +1,377 @@
+<template>
+  <div class="step-container">
+    <h2>Etapa 1: Entrada de Dados</h2>
+    <p class="step-description">Forneça o arquivo CSV ou URL do Google Sheets</p>
+    
+    <div class="input-options">
+      <!-- CSV File Upload -->
+      <div class="input-group">
+        <label class="input-label">
+          <input type="radio" v-model="inputType" value="csv" />
+          <span>Carregar arquivo CSV</span>
+        </label>
+        
+        <div v-if="inputType === 'csv'" class="input-content">
+          <div class="file-input-wrapper">
+            <button type="button" class="file-select-btn" @click="$refs.csvFileInput.click()">
+              📁 Escolher arquivo CSV
+            </button>
+            <input 
+              ref="csvFileInput" 
+              type="file" 
+              accept=".csv" 
+              @change="handleCsvUpload"
+              style="display: none;" 
+            />
+            <span class="file-name">{{ csvFileName || 'Nenhum arquivo selecionado' }}</span>
+          </div>
+          
+          <div v-if="csvData.length > 0" class="csv-preview">
+            <p><strong>{{ csvData.length }}</strong> linhas carregadas</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Google Sheets URL -->
+      <div class="input-group">
+        <label class="input-label">
+          <input type="radio" v-model="inputType" value="sheets" />
+          <span>URL do Google Sheets</span>
+        </label>
+        
+        <div v-if="inputType === 'sheets'" class="input-content">
+          <input 
+            v-model="sheetsUrl" 
+            type="text" 
+            class="sheets-input"
+            placeholder="Cole a URL do Google Sheets aqui..."
+          />
+          <p class="hint">A URL será automaticamente convertida para exportar como CSV</p>
+          <button 
+            type="button" 
+            class="load-btn" 
+            @click="loadFromSheets"
+            :disabled="!sheetsUrl || isLoading"
+          >
+            {{ isLoading ? 'Carregando...' : 'Carregar Dados' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="errorMessage" class="error-message">
+      {{ errorMessage }}
+    </div>
+  </div>
+</template>
+
+<script setup>
+import { ref } from 'vue'
+import Papa from 'papaparse'
+
+const emit = defineEmits(['next', 'data-loaded'])
+
+const inputType = ref('csv')
+const csvFileName = ref('')
+const csvData = ref([])
+const sheetsUrl = ref('')
+const isLoading = ref(false)
+const errorMessage = ref('')
+
+const handleCsvUpload = async (event) => {
+  const file = event.target.files?.[0]
+  if (!file) return
+  
+  console.log('📄 CSV Upload iniciado:', file.name)
+  csvFileName.value = file.name
+  errorMessage.value = ''
+  
+  try {
+    const text = await file.text()
+    console.log('📄 Arquivo lido, tamanho:', text.length, 'caracteres')
+    
+    // Parse CSV with PapaCSV
+    Papa.parse(text, {
+      header: true,
+      skipEmptyLines: true,
+      complete: (results) => {
+        console.log('✅ CSV parseado com sucesso')
+        console.log('📊 Colunas encontradas:', results.meta.fields)
+        console.log('📊 Total de linhas:', results.data.length)
+        console.log('📊 Primeiras 3 linhas:', results.data.slice(0, 3))
+        
+        // Handle missing/blank column names
+        const processedFields = results.meta.fields.map((field, index) => {
+          if (!field || field.trim() === '') {
+            return `Column_${index + 1}`
+          }
+          return field
+        })
+        
+        // Rename columns in data if needed
+        const processedData = results.data.map(row => {
+          const newRow = {}
+          results.meta.fields.forEach((oldName, index) => {
+            const newName = processedFields[index]
+            newRow[newName] = row[oldName]
+          })
+          return newRow
+        })
+        
+        console.log('📊 Colunas processadas:', processedFields)
+        
+        csvData.value = processedData
+        
+        emit('data-loaded', { 
+          type: 'csv', 
+          data: processedData,
+          columns: processedFields,
+          fileName: file.name,
+          rawText: text
+        })
+      },
+      error: (error) => {
+        console.error('❌ Erro ao parsear CSV:', error)
+        throw error
+      }
+    })
+  } catch (error) {
+    console.error('❌ Erro no upload do CSV:', error)
+    errorMessage.value = 'Erro ao carregar arquivo CSV: ' + error.message
+  }
+}
+
+const loadFromSheets = async () => {
+  if (!sheetsUrl.value) return
+  
+  console.log('🔗 Iniciando carregamento do Google Sheets')
+  console.log('🔗 URL original:', sheetsUrl.value)
+  
+  isLoading.value = true
+  errorMessage.value = ''
+  
+  try {
+    // Convert Google Sheets URL to CSV export URL
+    let url = sheetsUrl.value
+    
+    // Extract spreadsheet ID and convert to export URL
+    const match = url.match(/\/d\/([a-zA-Z0-9-_]+)/)
+    if (!match) {
+      console.error('❌ URL inválida - padrão não encontrado')
+      throw new Error('URL do Google Sheets inválida')
+    }
+    
+    const spreadsheetId = match[1]
+    console.log('🔑 Spreadsheet ID extraído:', spreadsheetId)
+    
+    const exportUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/export?format=csv`
+    console.log('📥 URL de exportação gerada:', exportUrl)
+    
+    // Fetch the CSV data from Google Sheets
+    console.log('🌐 Fazendo requisição para o Google Sheets...')
+    const response = await fetch(exportUrl)
+    
+    if (!response.ok) {
+      console.error('❌ Resposta do servidor:', response.status, response.statusText)
+      throw new Error(`Erro ao acessar o Google Sheets: ${response.status} ${response.statusText}`)
+    }
+    
+    const text = await response.text()
+    console.log('✅ Dados recebidos, tamanho:', text.length, 'caracteres')
+    
+    // Parse the CSV data
+    Papa.parse(text, {
+      header: true,
+      skipEmptyLines: true,
+      complete: (results) => {
+        console.log('✅ Google Sheets CSV parseado com sucesso')
+        console.log('📊 Colunas encontradas:', results.meta.fields)
+        console.log('📊 Total de linhas:', results.data.length)
+        console.log('📊 Primeiras 3 linhas:', results.data.slice(0, 3))
+        
+        // Handle missing/blank column names
+        const processedFields = results.meta.fields.map((field, index) => {
+          if (!field || field.trim() === '') {
+            return `Column_${index + 1}`
+          }
+          return field
+        })
+        
+        // Rename columns in data if needed
+        const processedData = results.data.map(row => {
+          const newRow = {}
+          results.meta.fields.forEach((oldName, index) => {
+            const newName = processedFields[index]
+            newRow[newName] = row[oldName]
+          })
+          return newRow
+        })
+        
+        console.log('📊 Colunas processadas:', processedFields)
+        
+        csvData.value = processedData
+        csvFileName.value = 'Google Sheets'
+        
+        emit('data-loaded', { 
+          type: 'sheets', 
+          data: processedData,
+          columns: processedFields,
+          url: exportUrl, 
+          originalUrl: sheetsUrl.value,
+          rawText: text
+        })
+      },
+      error: (error) => {
+        console.error('❌ Erro ao parsear CSV do Google Sheets:', error)
+        throw error
+      }
+    })
+    
+  } catch (error) {
+    errorMessage.value = 'Erro ao processar URL: ' + error.message
+  } finally {
+    isLoading.value = false
+  }
+}
+</script>
+
+<style scoped>
+.step-container {
+  padding: 2rem;
+  max-width: 800px;
+  margin: 0 auto;
+}
+
+h2 {
+  font-size: 1.8rem;
+  color: #2c3e50;
+  margin-bottom: 0.5rem;
+}
+
+.step-description {
+  color: #666;
+  margin-bottom: 2rem;
+}
+
+.input-options {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.input-group {
+  border: 2px solid #e0e0e0;
+  border-radius: 8px;
+  padding: 1.5rem;
+  transition: all 0.3s ease;
+}
+
+.input-group:has(input[type="radio"]:checked) {
+  border-color: #4360e3;
+  background-color: #f8f9ff;
+}
+
+.input-label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 600;
+  cursor: pointer;
+  font-size: 1.1rem;
+}
+
+.input-label input[type="radio"] {
+  width: 20px;
+  height: 20px;
+  cursor: pointer;
+}
+
+.input-content {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid #e0e0e0;
+}
+
+.file-input-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.file-select-btn {
+  background-color: #4360e3;
+  color: white;
+  padding: 0.75rem 1.5rem;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 1rem;
+  transition: background-color 0.3s;
+}
+
+.file-select-btn:hover {
+  background-color: #3550d0;
+}
+
+.file-name {
+  color: #666;
+  font-size: 0.9rem;
+}
+
+.sheets-input {
+  width: 100%;
+  padding: 0.75rem;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 1rem;
+  margin-bottom: 0.5rem;
+}
+
+.sheets-input:focus {
+  outline: none;
+  border-color: #4360e3;
+}
+
+.hint {
+  font-size: 0.85rem;
+  color: #666;
+  margin-bottom: 1rem;
+}
+
+.load-btn {
+  background-color: #4360e3;
+  color: white;
+  padding: 0.75rem 2rem;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 1rem;
+  transition: background-color 0.3s;
+}
+
+.load-btn:hover:not(:disabled) {
+  background-color: #3550d0;
+}
+
+.load-btn:disabled {
+  background-color: #ccc;
+  cursor: not-allowed;
+}
+
+.csv-preview {
+  margin-top: 1rem;
+  padding: 1rem;
+  background-color: #e7f3ff;
+  border-left: 4px solid #4360e3;
+  border-radius: 4px;
+}
+
+.error-message {
+  margin-top: 1rem;
+  padding: 1rem;
+  background-color: #ffe7e7;
+  border-left: 4px solid #dc3545;
+  border-radius: 4px;
+  color: #dc3545;
+}
+</style>
