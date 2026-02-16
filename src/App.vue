@@ -71,6 +71,13 @@ const handleDataLoaded = (data) => {
   console.log('🎯 App.vue recebeu dados:', data)
   inputData.value = data
   
+  // Reset all state when new data is loaded
+  columnState.value = []
+  selectedColumns.value = []
+  newColumns.value = []
+  sanitizeOptions.value = {}
+  outputConfig.value = null
+  
   // Extract columns and data
   if (data.columns && data.columns.length > 0) {
     csvColumns.value = data.columns
@@ -84,6 +91,7 @@ const handleDataLoaded = (data) => {
     console.log('✅ Colunas extraídas:', csvColumns.value)
     console.log('✅ Total de linhas:', csvParsedData.value.length)
     console.log('✅ Dados de exemplo:', csvSampleData.value)
+    console.log('🔄 Estado resetado para novo arquivo')
   }
 }
 
@@ -250,6 +258,108 @@ const processedData = computed(() => {
   return data
 })
 
+// Computed property for FULL data (before column filtering) - needed for AI prompts
+const fullProcessedData = computed(() => {
+  if (!csvParsedData.value || csvParsedData.value.length === 0) return []
+  
+  let data = [...csvParsedData.value]
+  
+  // Apply sanitization
+  if (sanitizeOptions.value.removeEmptyRows) {
+    data = data.filter(row => {
+      return Object.values(row).some(val => val && val.toString().trim())
+    })
+  }
+  
+  if (sanitizeOptions.value.trimWhitespace) {
+    data = data.map(row => {
+      const trimmed = {}
+      Object.keys(row).forEach(key => {
+        trimmed[key] = row[key] ? row[key].toString().trim() : ''
+      })
+      return trimmed
+    })
+  }
+  
+  if (sanitizeOptions.value.removeDuplicates) {
+    const seen = new Set()
+    data = data.filter(row => {
+      const key = JSON.stringify(row)
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+  }
+  
+  // Add formula/sequence/date columns (but NOT AI columns yet)
+  if (newColumns.value && newColumns.value.length > 0) {
+    const displayToOriginalMap = {}
+    if (columnState.value && columnState.value.length > 0) {
+      columnState.value.forEach(col => {
+        displayToOriginalMap[col.displayName] = col.originalName
+      })
+    }
+    
+    data = data.map((row, index) => {
+      const enhanced = { ...row }
+      newColumns.value.forEach(col => {
+        if (!col.name) return
+        
+        switch (col.valueType) {
+          case 'fixed':
+            enhanced[col.name] = col.value || ''
+            break
+          case 'sequence':
+            enhanced[col.name] = (col.sequenceStart || 1) + index
+            break
+          case 'date':
+            const now = new Date()
+            switch (col.dateFormat) {
+              case 'yyyy-mm-dd':
+                enhanced[col.name] = now.toISOString().split('T')[0]
+                break
+              case 'dd/mm/yyyy':
+                enhanced[col.name] = `${now.getDate().toString().padStart(2, '0')}/${(now.getMonth() + 1).toString().padStart(2, '0')}/${now.getFullYear()}`
+                break
+              case 'mm/dd/yyyy':
+                enhanced[col.name] = `${(now.getMonth() + 1).toString().padStart(2, '0')}/${now.getDate().toString().padStart(2, '0')}/${now.getFullYear()}`
+                break
+              default:
+                enhanced[col.name] = now.toISOString()
+            }
+            break
+          case 'formula':
+            let formula = col.formula || ''
+            const matches = formula.match(/\{([^}]+)\}/g)
+            if (matches) {
+              matches.forEach(match => {
+                const colName = match.slice(1, -1).trim()
+                let value = ''
+                if (row[colName] !== undefined) {
+                  value = row[colName]
+                } else if (displayToOriginalMap[colName] && row[displayToOriginalMap[colName]] !== undefined) {
+                  value = row[displayToOriginalMap[colName]]
+                }
+                formula = formula.replace(match, value)
+              })
+            }
+            enhanced[col.name] = formula
+            break
+          case 'ai':
+            // AI columns initialized as empty
+            enhanced[col.name] = ''
+            break
+        }
+      })
+      return enhanced
+    })
+  }
+  
+  // Return ALL columns (no filtering) - AI processing needs access to everything
+  console.log('✅ Dados completos (sem filtro):', data.length, 'linhas')
+  return data
+})
+
 const outputFileName = computed(() => {
   if (outputConfig.value?.downloadConfig?.fileName) {
     return outputConfig.value.downloadConfig.fileName
@@ -313,7 +423,9 @@ const outputFileName = computed(() => {
               :selectedColumnsCount="selectedColumns.length"
               :newColumnsCount="newColumns.length"
               :outputSummary="outputSummary"
+              :fullData="fullProcessedData"
               :processedData="processedData"
+              :selectedColumns="selectedColumns"
               :fileName="outputFileName"
               :newColumns="newColumns"
               :columnState="columnState"

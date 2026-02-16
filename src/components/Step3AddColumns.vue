@@ -118,22 +118,51 @@
                     v-model="tempApiKey" 
                     :type="showApiKey ? 'text' : 'password'"
                     placeholder="Digite sua chave da API Gemini"
-                    class="form-input"
+                    class="form-input api-key-input"
                   />
-                  <button type="button" @click="showApiKey = !showApiKey" class="toggle-visibility-btn">
+                  <button type="button" @click="showApiKey = !showApiKey" class="toggle-visibility-btn" title="Mostrar/Ocultar chave">
                     {{ showApiKey ? '🙈' : '👁️' }}
                   </button>
                 </div>
                 <p class="hint">Sua chave será armazenada localmente no navegador. <a href="https://aistudio.google.com/app/apikey" target="_blank">Obter chave</a></p>
-                <button type="button" @click="saveApiKey" class="save-api-key-btn">Salvar Chave</button>
+                <button type="button" @click="saveApiKey" class="save-api-key-btn" :disabled="!tempApiKey.trim()">Salvar Chave</button>
               </div>
             </div>
             
             <div v-else class="api-key-saved">
-              <p v-if="hasDefaultKey && !localStorage.getItem('gemini_api_key')">✓ Usando chave padrão do sistema</p>
-              <p v-else>✓ Chave da API configurada</p>
-              <button v-if="localStorage.getItem('gemini_api_key')" type="button" @click="clearApiKey" class="clear-api-key-btn">Remover Chave</button>
-              <span v-else class="hint-text">Você pode adicionar sua própria chave para substituir a padrão</span>
+              <div>
+                <p v-if="currentApiKeySource === 'default'">✓ Usando chave padrão do sistema</p>
+                <p v-else-if="currentApiKeySource === 'user'">✓ Chave da API configurada (sua chave)</p>
+                <p v-else>✓ Chave da API configurada</p>
+                <p class="hint" style="margin-top: 0.5rem;">
+                  Chave atual: {{ geminiApiKey.substring(0, 15) }}...{{ geminiApiKey.substring(geminiApiKey.length - 4) }}
+                </p>
+              </div>
+              <div class="api-key-actions">
+                <button v-if="!showKeyInput" type="button" @click="showKeyInput = true" class="change-api-key-btn">Alterar Chave</button>
+                <button v-if="hasUserKey" type="button" @click="clearApiKey" class="clear-api-key-btn">Remover Chave</button>
+              </div>
+            </div>
+            
+            <div v-if="geminiApiKey && showKeyInput" class="api-key-section" style="margin-top: 1rem;">
+              <div class="form-group">
+                <label>Nova Chave da API Gemini</label>
+                <div class="api-key-input-group">
+                  <input 
+                    v-model="tempApiKey" 
+                    :type="showApiKey ? 'text' : 'password'"
+                    placeholder="Digite a nova chave da API Gemini"
+                    class="form-input api-key-input"
+                  />
+                  <button type="button" @click="showApiKey = !showApiKey" class="toggle-visibility-btn" title="Mostrar/Ocultar chave">
+                    {{ showApiKey ? '🙈' : '👁️' }}
+                  </button>
+                </div>
+                <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem;">
+                  <button type="button" @click="saveApiKey" class="save-api-key-btn" :disabled="!tempApiKey.trim()">Salvar Nova Chave</button>
+                  <button type="button" @click="showKeyInput = false; tempApiKey = ''; showApiKey = false" class="cancel-btn">Cancelar</button>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -180,45 +209,70 @@ if (newColumns.value.length > 0) {
 const geminiApiKey = ref('')
 const tempApiKey = ref('')
 const showApiKey = ref(false)
+const showKeyInput = ref(false)
 const hasDefaultKey = ref(false)
+const hasUserKey = ref(false)
+const currentApiKeySource = ref('') // 'default', 'user', or ''
 
 // Load API key from localStorage on mount
 onMounted(() => {
   const savedKey = localStorage.getItem('gemini_api_key')
   if (savedKey) {
     geminiApiKey.value = savedKey
+    hasUserKey.value = true
+    currentApiKeySource.value = 'user'
   }
   
   // Check if default key is available from environment
   const defaultKey = import.meta.env.VITE_GEMINI_API_KEY
+  console.log('🔑 Verificando chave padrão do ambiente:', defaultKey ? 'Encontrada' : 'Não encontrada')
   if (defaultKey && defaultKey.trim()) {
     hasDefaultKey.value = true
     // Use default key if user hasn't set their own
     if (!geminiApiKey.value) {
       geminiApiKey.value = defaultKey
+      currentApiKeySource.value = 'default'
+      console.log('🔑 Usando chave padrão do ambiente')
+    } else {
+      console.log('🔑 Usando chave do localStorage')
     }
   }
+  
+  console.log('🔑 Chave da API carregada:', geminiApiKey.value ? '✓' : '✗')
+  console.log('🔑 Fonte:', currentApiKeySource.value)
+  console.log('🔑 Primeiros 10 caracteres:', geminiApiKey.value ? geminiApiKey.value.substring(0, 10) + '...' : 'N/A')
 })
 
 const saveApiKey = () => {
   if (tempApiKey.value.trim()) {
     localStorage.setItem('gemini_api_key', tempApiKey.value.trim())
     geminiApiKey.value = tempApiKey.value.trim()
+    hasUserKey.value = true
+    currentApiKeySource.value = 'user'
     tempApiKey.value = ''
     showApiKey.value = false
+    showKeyInput.value = false
+    console.log('✅ Chave da API salva com sucesso')
+    console.log('🔑 Primeiros 10 caracteres:', geminiApiKey.value.substring(0, 10) + '...')
   }
 }
 
 const clearApiKey = () => {
   localStorage.removeItem('gemini_api_key')
   tempApiKey.value = ''
+  hasUserKey.value = false
+  showKeyInput.value = false
   
   // Restore default key if available
   const defaultKey = import.meta.env.VITE_GEMINI_API_KEY
   if (defaultKey && defaultKey.trim()) {
     geminiApiKey.value = defaultKey
+    currentApiKeySource.value = 'default'
+    console.log('🔑 Chave do usuário removida, voltando para chave padrão')
   } else {
     geminiApiKey.value = ''
+    currentApiKeySource.value = ''
+    console.log('🔑 Chave removida completamente')
   }
 }
 
@@ -230,7 +284,9 @@ const addNewColumn = () => {
     value: '',
     formula: '',
     sequenceStart: 1,
-    dateFormat: 'yyyy-mm-dd'
+    dateFormat: 'yyyy-mm-dd',
+    aiPrompt: '',
+    duplicateWarning: false
   })
   emitUpdate()
 }
@@ -276,6 +332,19 @@ const getFormulaPreview = (formula) => {
 const updatePreview = (col) => {
   // Trigger reactivity for preview
   emitUpdate()
+}
+
+const checkDuplicateName = (col) => {
+  if (!col.name) {
+    col.duplicateWarning = false
+    return
+  }
+  
+  // Check if name conflicts with existing columns from CSV
+  const existingColumns = props.columnState.map(c => c.displayName.toLowerCase())
+  const isDuplicate = existingColumns.includes(col.name.toLowerCase())
+  
+  col.duplicateWarning = isDuplicate
 }
 
 const emitUpdate = () => {
@@ -462,6 +531,11 @@ h2 {
 .api-key-input-group {
   display: flex;
   gap: 0.5rem;
+  align-items: stretch;
+}
+
+.api-key-input {
+  flex: 1;
 }
 
 .toggle-visibility-btn {
@@ -471,6 +545,8 @@ h2 {
   border-radius: 4px;
   cursor: pointer;
   font-size: 1.2rem;
+  transition: background-color 0.2s;
+  flex-shrink: 0;
 }
 
 .toggle-visibility-btn:hover {
@@ -478,7 +554,6 @@ h2 {
 }
 
 .save-api-key-btn {
-  margin-top: 0.5rem;
   padding: 0.5rem 1rem;
   background: #4360e3;
   color: white;
@@ -486,10 +561,32 @@ h2 {
   border-radius: 4px;
   cursor: pointer;
   font-weight: 600;
+  transition: background-color 0.2s;
 }
 
-.save-api-key-btn:hover {
+.save-api-key-btn:hover:not(:disabled) {
   background: #3550d3;
+}
+
+.save-api-key-btn:disabled {
+  background: #ccc;
+  cursor: not-allowed;
+}
+
+.cancel-btn {
+  padding: 0.5rem 1rem;
+  background: transparent;
+  color: #666;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: 600;
+  transition: all 0.2s;
+}
+
+.cancel-btn:hover {
+  background: #f0f0f0;
+  border-color: #999;
 }
 
 .api-key-saved {
@@ -500,13 +597,40 @@ h2 {
   border: 1px solid #b3e5d0;
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
+  gap: 1rem;
+}
+
+.api-key-saved > div:first-child {
+  flex: 1;
+}
+
+.api-key-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-shrink: 0;
 }
 
 .api-key-saved p {
   margin: 0;
   color: #0a8754;
   font-weight: 600;
+}
+
+.change-api-key-btn {
+  padding: 0.4rem 0.8rem;
+  background: #4360e3;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  white-space: nowrap;
+  transition: background-color 0.2s;
+}
+
+.change-api-key-btn:hover {
+  background: #3550d3;
 }
 
 .hint-text {

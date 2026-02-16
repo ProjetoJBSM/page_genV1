@@ -86,7 +86,15 @@ const props = defineProps({
     type: String,
     default: 'Não configurado'
   },
+  fullData: {
+    type: Array,
+    default: () => []
+  },
   processedData: {
+    type: Array,
+    default: () => []
+  },
+  selectedColumns: {
     type: Array,
     default: () => []
   },
@@ -161,7 +169,7 @@ const processData = async () => {
     
     // Process AI columns if any
     const aiColumns = props.newColumns.filter(col => col.valueType === 'ai' && col.aiPrompt)
-    let finalData = [...props.processedData]
+    let finalData = [...props.fullData]  // Use fullData for AI processing (has all columns)
     
     if (aiColumns.length > 0) {
       let apiKey = localStorage.getItem('gemini_api_key')
@@ -188,6 +196,10 @@ const processData = async () => {
       // Process each AI column
       for (const aiCol of aiColumns) {
         console.log(`🤖 Processando coluna IA: ${aiCol.name}`)
+        console.log(`📝 Prompt template: ${aiCol.aiPrompt}`)
+        
+        let processedCount = 0
+        let skippedCount = 0
         
         // Process each row
         for (let i = 0; i < finalData.length; i++) {
@@ -195,37 +207,75 @@ const processData = async () => {
           
           // Skip if cell already has content (for updating existing spreadsheets)
           if (row[aiCol.name] && row[aiCol.name].trim() !== '') {
+            console.log(`⊙ Linha ${i + 1} pulada (já tem conteúdo)`)
+            skippedCount++
             continue
           }
           
           // Check if any referenced columns have missing data
+          console.log(`\n📋 Linha ${i + 1}: Analisando prompt...`)
+          console.log(`📝 Prompt template: "${aiCol.aiPrompt}"`)
+          
+          // Log available columns for debugging
+          if (i === 0) {
+            console.log(`📊 Colunas disponíveis na linha:`, Object.keys(row))
+            console.log(`📊 Mapeamento displayName -> originalName:`, displayToOriginalMap)
+          }
+          
           let hasAllData = true
           const matches = aiCol.aiPrompt.match(/\{([^}]+)\}/g)
+          const columnValues = {}
           
           if (matches) {
+            console.log(`🔍 Colunas referenciadas no prompt: ${matches.join(', ')}`)
+            
             for (const match of matches) {
               const colName = match.slice(1, -1).trim()
               
-              // Try to find value: direct match or display->original mapping
+              // Try to find value with various strategies
               let value = ''
-              if (row[colName] !== undefined && row[colName] !== null) {
+              let foundIn = ''
+              
+              // Strategy 1: Direct match
+              if (row[colName] !== undefined && row[colName] !== null && row[colName] !== '') {
                 value = row[colName]
-              } else if (displayToOriginalMap[colName] && row[displayToOriginalMap[colName]] !== undefined && row[displayToOriginalMap[colName]] !== null) {
+                foundIn = 'direto'
+              } 
+              // Strategy 2: Display to original mapping
+              else if (displayToOriginalMap[colName] && row[displayToOriginalMap[colName]] !== undefined && row[displayToOriginalMap[colName]] !== null && row[displayToOriginalMap[colName]] !== '') {
                 value = row[displayToOriginalMap[colName]]
+                foundIn = `mapeado de "${displayToOriginalMap[colName]}"`
+              }
+              // Strategy 3: Case-insensitive search with trimmed names
+              else {
+                const normalizedColName = colName.toLowerCase().trim()
+                for (const [key, val] of Object.entries(row)) {
+                  const normalizedKey = key.toLowerCase().trim()
+                  if (normalizedKey === normalizedColName && val !== undefined && val !== null && val !== '') {
+                    value = val
+                    foundIn = `encontrado via busca (coluna original: "${key}")`
+                    break
+                  }
+                }
               }
               
-              // Skip row if value is empty/null/undefined
+              columnValues[colName] = value
+              
+              // Log the value found (or not found)
               if (value === '' || value === null || value === undefined) {
+                console.log(`   ❌ {${colName}}: VAZIO/NÃO ENCONTRADO`)
                 hasAllData = false
-                break
+              } else {
+                console.log(`   ✓ {${colName}}: "${value}" (${foundIn})`)
               }
             }
           }
           
           // Skip this row if any referenced column has missing data
           if (!hasAllData) {
-            console.log(`⊘ Linha ${i + 1} pulada (dados faltando)`)
+            console.log(`⊘ Linha ${i + 1} pulada (dados faltando)\n`)
             finalData[i][aiCol.name] = ''
+            skippedCount++
             continue
           }
           
@@ -235,18 +285,12 @@ const processData = async () => {
           if (matches) {
             matches.forEach(match => {
               const colName = match.slice(1, -1).trim()
-              
-              // Try to find value: direct match or display->original mapping
-              let value = ''
-              if (row[colName] !== undefined) {
-                value = row[colName]
-              } else if (displayToOriginalMap[colName] && row[displayToOriginalMap[colName]] !== undefined) {
-                value = row[displayToOriginalMap[colName]]
-              }
-              
+              const value = columnValues[colName] || ''
               prompt = prompt.replace(match, value)
             })
           }
+          
+          console.log(`🔄 Prompt final completo:\n"${prompt}"`)
           
           // Update progress
           const rowProgress = ((i + 1) / finalData.length) * 20 // 20% of progress bar for AI
@@ -254,18 +298,49 @@ const processData = async () => {
           progressText.value = `IA processando linha ${i + 1}/${finalData.length} da coluna "${aiCol.name}"...`
           
           try {
+            console.log(`⏳ Chamando Gemini API para linha ${i + 1}...`)
+            const startTime = Date.now()
             const result = await callGeminiAPI(prompt, apiKey)
+            const elapsed = Date.now() - startTime
             finalData[i][aiCol.name] = result.trim()
-            console.log(`✓ Linha ${i + 1} processada`)
+            console.log(`✓ Linha ${i + 1} processada em ${elapsed}ms`)
+            console.log(`📄 Resposta: ${result.substring(0, 100)}...`)
+            processedCount++
           } catch (error) {
             console.error(`✗ Erro na linha ${i + 1}:`, error)
             finalData[i][aiCol.name] = `[Erro: ${error.message}]`
           }
           
           // Small delay to avoid rate limiting
-          await new Promise(resolve => setTimeout(resolve, 100))
+          await new Promise(resolve => setTimeout(resolve, 500))
         }
+        
+        console.log(`📊 Coluna "${aiCol.name}" concluída: ${processedCount} processadas, ${skippedCount} puladas`)
       }
+    }
+    
+    // Now filter to selected columns only for final export
+    if (props.selectedColumns && props.selectedColumns.length > 0) {
+      finalData = finalData.map(row => {
+        const filtered = {}
+        
+        // Add selected columns with their renamed displayNames
+        props.selectedColumns.forEach(col => {
+          // Access data using originalName, but store with displayName
+          filtered[col.displayName] = row[col.originalName]
+        })
+        
+        // Add new columns (custom columns should be kept)
+        if (props.newColumns && props.newColumns.length > 0) {
+          props.newColumns.forEach(col => {
+            if (col.name && row[col.name] !== undefined) {
+              filtered[col.name] = row[col.name]
+            }
+          })
+        }
+        
+        return filtered
+      })
     }
     
     progressText.value = 'Gerando arquivo CSV...'

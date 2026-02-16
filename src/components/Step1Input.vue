@@ -93,12 +93,88 @@ const handleCsvUpload = async (event) => {
     // Parse CSV with PapaCSV
     Papa.parse(text, {
       header: true,
-      skipEmptyLines: true,
+      skipEmptyLines: 'greedy',
+      delimiter: ',',
+      quoteChar: '"',
+      escapeChar: '"',
+      dynamicTyping: false,  // Keep all values as strings to preserve formatting
+      trimHeaders: true,
       complete: (results) => {
         console.log('✅ CSV parseado com sucesso')
         console.log('📊 Colunas encontradas:', results.meta.fields)
+        console.log('📊 Total de colunas:', results.meta.fields.length)
         console.log('📊 Total de linhas:', results.data.length)
         console.log('📊 Primeiras 3 linhas:', results.data.slice(0, 3))
+        console.log('📊 Primeira linha completa:', JSON.stringify(results.data[0], null, 2))
+        console.log('📊 Erros do parser:', results.errors)
+        
+        // Fix incorrectly split quoted fields
+        const fixedData = results.data.map(row => {
+          const columnNames = results.meta.fields
+          const values = columnNames.map(col => row[col])
+          
+          // Process values to merge split quoted fields
+          const mergedValues = []
+          let i = 0
+          
+          while (i < values.length) {
+            const val = values[i]
+            if (typeof val === 'string') {
+              const trimmed = val.trim()
+              
+              // Check if this value starts with quote but doesn't end with one
+              if (trimmed.startsWith('"') && !trimmed.endsWith('"')) {
+                // Look ahead to find the closing quote
+                let merged = val
+                let j = i + 1
+                
+                while (j < values.length) {
+                  merged += ',' + values[j]
+                  if (typeof values[j] === 'string' && values[j].trim().endsWith('"')) {
+                    // Found the closing quote, stop here
+                    mergedValues.push(merged)
+                    i = j + 1
+                    break
+                  }
+                  j++
+                }
+                
+                // If we didn't find a closing quote, just add as-is
+                if (j >= values.length) {
+                  mergedValues.push(val)
+                  i++
+                }
+              } else {
+                // Normal value, just add it
+                mergedValues.push(val)
+                i++
+              }
+            } else {
+              mergedValues.push(val)
+              i++
+            }
+          }
+          
+          // Rebuild the row object with merged values
+          const fixed = {}
+          for (let idx = 0; idx < Math.min(columnNames.length, mergedValues.length); idx++) {
+            let value = mergedValues[idx]
+            
+            // Strip quotes from fully quoted values
+            if (typeof value === 'string') {
+              const trimmed = value.trim()
+              if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
+                value = trimmed.slice(1, -1)
+              }
+            }
+            
+            fixed[columnNames[idx]] = value
+          }
+          
+          return fixed
+        })
+        
+        console.log('📊 Dados corrigidos, primeira linha:', JSON.stringify(fixedData[0], null, 2))
         
         // Handle missing/blank column names
         const processedFields = results.meta.fields.map((field, index) => {
@@ -109,7 +185,7 @@ const handleCsvUpload = async (event) => {
         })
         
         // Rename columns in data if needed
-        const processedData = results.data.map(row => {
+        const processedData = fixedData.map(row => {
           const newRow = {}
           results.meta.fields.forEach((oldName, index) => {
             const newName = processedFields[index]
@@ -182,12 +258,83 @@ const loadFromSheets = async () => {
     // Parse the CSV data
     Papa.parse(text, {
       header: true,
-      skipEmptyLines: true,
+      skipEmptyLines: 'greedy',
+      delimiter: ',',
+      quoteChar: '"',
+      escapeChar: '"',
+      dynamicTyping: false,  // Keep all values as strings to preserve formatting
+      trimHeaders: true,
       complete: (results) => {
         console.log('✅ Google Sheets CSV parseado com sucesso')
         console.log('📊 Colunas encontradas:', results.meta.fields)
         console.log('📊 Total de linhas:', results.data.length)
         console.log('📊 Primeiras 3 linhas:', results.data.slice(0, 3))
+        
+        // Fix incorrectly split quoted fields
+        const fixedData = results.data.map(row => {
+          const columnNames = results.meta.fields
+          const values = columnNames.map(col => row[col])
+          
+          // Process values to merge split quoted fields
+          const mergedValues = []
+          let i = 0
+          
+          while (i < values.length) {
+            const val = values[i]
+            if (typeof val === 'string') {
+              const trimmed = val.trim()
+              
+              // Check if this value starts with quote but doesn't end with one
+              if (trimmed.startsWith('"') && !trimmed.endsWith('"')) {
+                // Look ahead to find the closing quote
+                let merged = val
+                let j = i + 1
+                
+                while (j < values.length) {
+                  merged += ',' + values[j]
+                  if (typeof values[j] === 'string' && values[j].trim().endsWith('"')) {
+                    // Found the closing quote, stop here
+                    mergedValues.push(merged)
+                    i = j + 1
+                    break
+                  }
+                  j++
+                }
+                
+                // If we didn't find a closing quote, just add as-is
+                if (j >= values.length) {
+                  mergedValues.push(val)
+                  i++
+                }
+              } else {
+                // Normal value, just add it
+                mergedValues.push(val)
+                i++
+              }
+            } else {
+              mergedValues.push(val)
+              i++
+            }
+          }
+          
+          // Rebuild the row object with merged values
+          const fixed = {}
+          for (let idx = 0; idx < Math.min(columnNames.length, mergedValues.length); idx++) {
+            let value = mergedValues[idx]
+            
+            // Strip quotes from fully quoted values
+            if (typeof value === 'string') {
+              const trimmed = value.trim()
+              if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
+                value = trimmed.slice(1, -1)
+              }
+            }
+            
+            fixed[columnNames[idx]] = value
+          }
+          
+          return fixed
+        })
         
         // Handle missing/blank column names
         const processedFields = results.meta.fields.map((field, index) => {
@@ -198,7 +345,7 @@ const loadFromSheets = async () => {
         })
         
         // Rename columns in data if needed
-        const processedData = results.data.map(row => {
+        const processedData = fixedData.map(row => {
           const newRow = {}
           results.meta.fields.forEach((oldName, index) => {
             const newName = processedFields[index]

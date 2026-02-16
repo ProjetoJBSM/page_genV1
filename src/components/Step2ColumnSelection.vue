@@ -118,7 +118,7 @@ const emit = defineEmits(['update:selection', 'next', 'prev'])
 // Use savedColumnState if available (for persistence), otherwise initialize from props.columns
 const orderedColumns = ref(
   props.savedColumnState && props.savedColumnState.length > 0
-    ? props.savedColumnState
+    ? JSON.parse(JSON.stringify(props.savedColumnState))  // Deep copy to avoid reactivity issues
     : props.columns.map(col => ({ 
         originalName: col, 
         displayName: col, 
@@ -177,7 +177,8 @@ const emitUpdate = () => {
     columns: selected,
     columnOrder: orderedColumns.value.map(col => ({
       originalName: col.originalName,
-      displayName: col.displayName
+      displayName: col.displayName,
+      selected: col.selected  // Preserve selection state
     })),
     sanitizeOptions: sanitizeOptions.value
   })
