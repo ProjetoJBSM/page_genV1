@@ -63,11 +63,11 @@
             <input 
               v-model="col.formula" 
               type="text" 
-              placeholder="Ex: {coluna1} - {coluna2}"
+              placeholder="Ex: {coluna1} - {coluna2} ou {padLeft(codigo, 3)}"
               class="form-input"
               @input="updatePreview(col)"
             />
-            <p class="hint">Use {nomeColuna} para referenciar outras colunas</p>
+            <p class="hint">Use {nomeColuna} para referenciar colunas. Funções disponíveis: {padLeft(valor, tamanho)}</p>
             
             <!-- Formula Preview -->
             <div v-if="col.formula && sampleRow" class="formula-preview">
@@ -84,6 +84,18 @@
               type="number" 
               class="form-input"
             />
+          </div>
+
+          <div v-if="col.valueType === 'sequence'" class="form-group">
+            <label>Formato com Zeros à Esquerda</label>
+            <input 
+              v-model.number="col.sequencePadding" 
+              type="number" 
+              placeholder="Ex: 3 para 001, 002, 003..."
+              class="form-input"
+              min="0"
+            />
+            <p class="hint">Deixe 0 ou vazio para não aplicar padding</p>
           </div>
 
           <!-- Date Format -->
@@ -284,6 +296,7 @@ const addNewColumn = () => {
     value: '',
     formula: '',
     sequenceStart: 1,
+    sequencePadding: 0,
     dateFormat: 'yyyy-mm-dd',
     aiPrompt: '',
     duplicateWarning: false

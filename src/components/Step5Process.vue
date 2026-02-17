@@ -61,13 +61,34 @@
         <div class="progress-fill" :style="{ width: progress + '%' }"></div>
       </div>
       <p class="progress-text">{{ progressText }}</p>
+      
+      <div v-if="queueStats.queued > 0 || queueStats.completed > 0" class="queue-stats">
+        <div class="stat-item">
+          <span class="stat-label">🌱 Plantas:</span>
+          <span class="stat-value">{{ queueStats.plantsProcessed }}/{{ queueStats.totalPlants }}</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">💾 Cache:</span>
+          <span class="stat-value">{{ queueStats.cached }}</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">📦 Lotes:</span>
+          <span class="stat-value">{{ queueStats.completed }}</span>
+        </div>
+        <div class="stat-item" v-if="queueStats.errors > 0">
+          <span class="stat-label">❌ Erros:</span>
+          <span class="stat-value error">{{ queueStats.errors }}</span>
+        </div>
+      </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import Papa from 'papaparse'
+import { RequestQueue } from '../services/requestQueue.js'
+import { cacheManager } from '../services/cacheManager.js'
 
 const props = defineProps({
   inputSummary: {
@@ -120,34 +141,95 @@ const downloadUrl = ref('')
 const downloadFileName = ref('')
 const progress = ref(0)
 const progressText = ref('')
+const queueStats = ref({
+  queued: 0,
+  completed: 0,
+  cached: 0,
+  errors: 0,
+  totalPlants: 0,
+  plantsProcessed: 0
+})
 
-// Gemini API helper
+// Request queue instance
+let requestQueue = null
+
+// Session ID for progress tracking
+const sessionId = ref('')
+
+// Gemini API helper - using Google's recommended format
 const callGeminiAPI = async (prompt, apiKey) => {
-  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${apiKey}`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      contents: [{
-        parts: [{ text: prompt }]
-      }]
-    })
-  })
+  console.log(`🔄 Iniciando chamada à API Gemini...`)
   
-  if (!response.ok) {
-    throw new Error(`Gemini API error: ${response.status} ${response.statusText}`)
+  // Use Google's exact recommended endpoint and model
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${apiKey}`
+  
+  console.log(`📡 Usando modelo: gemini-2.5-flash-lite`)
+  
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        contents: [{
+          parts: [{ text: prompt }]
+        }]
+      })
+    })
+    
+    console.log(`📊 Status: ${response.status}`)
+    
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => null)
+      console.error(`❌ Erro da API:`, errorData)
+      throw new Error(errorData?.error?.message || `HTTP ${response.status}`)
+    }
+    
+    const data = await response.json()
+    
+    // Handle response
+    if (data.candidates?.[0]?.content?.parts?.[0]?.text) {
+      console.log(`✅ Sucesso!`)
+      return data.candidates[0].content.parts[0].text
+    } else if (data.error) {
+      throw new Error(data.error.message)
+    } else {
+      console.warn(`⚠️ Resposta inesperada:`, data)
+      throw new Error('Formato de resposta inesperado')
+    }
+  } catch (error) {
+    console.error(`\n❌ ERRO NA CHAMADA DA API ❌`)
+    console.error(`Erro:`, error.message)
+    console.error(`\n🔍 SOLUÇÃO:`)
+    console.error(`1. Verifique sua API key em: https://aistudio.google.com/`)
+    console.error(`2. Certifique-se de ter aceitado os Termos de Serviço`)
+    console.error(`3. Se o erro persistir, teste a API key manualmente no AI Studio`)
+    
+    throw error
+  }
+}
+
+// Load saved progress on mount
+onMounted(() => {
+  // Check if there's saved progress
+  const savedProgress = cacheManager.loadProgress('current_session')
+  if (savedProgress && savedProgress.processedRows) {
+    console.log('💾 Found saved progress:', savedProgress)
+    // Could potentially restore state here
   }
   
-  const data = await response.json()
-  return data.candidates[0].content.parts[0].text
-}
+  // Log cache stats
+  const stats = cacheManager.getStats()
+  console.log('💾 Cache stats:', stats)
+})
 
 const processData = async () => {
   isProcessing.value = true
   processStatus.value = null
   downloadUrl.value = ''
   progress.value = 0
+  queueStats.value = { queued: 0, completed: 0, cached: 0, errors: 0, totalPlants: 0, plantsProcessed: 0 }
   
   try {
     console.log('🚀 Iniciando processamento...')
@@ -164,7 +246,7 @@ const processData = async () => {
     emit('process')
     
     progressText.value = 'Aplicando transformações...'
-    progress.value = 60
+    progress.value = 50
     await new Promise(resolve => setTimeout(resolve, 300))
     
     // Process AI columns if any
@@ -183,7 +265,8 @@ const processData = async () => {
         throw new Error('Chave da API Gemini não configurada. Configure na Etapa 3.')
       }
       
-      progressText.value = `Processando com IA (${aiColumns.length} colunas)...`
+      progressText.value = `Preparando processamento com IA (${aiColumns.length} colunas)...`
+      progress.value = 55
       
       // Create mapping from displayName to originalName
       const displayToOriginalMap = {}
@@ -193,130 +276,272 @@ const processData = async () => {
         })
       }
       
+      // Generate session ID for progress tracking
+      sessionId.value = `session_${Date.now()}`
+      
+      // Initialize request queue with 15 requests per minute limit and 5 second delay between batches
+      requestQueue = new RequestQueue(15, 5000)
+      
+      // Set up queue callbacks
+      requestQueue.onProgress = (progressData) => {
+        queueStats.value.completed = progressData.completed
+        queueStats.value.errors = progressData.errors
+        
+        const totalBatches = progressData.total
+        const currentBatches = progressData.completed
+        const percent = Math.floor((queueStats.value.plantsProcessed / queueStats.value.totalPlants) * 30) // 30% of progress bar for AI
+        progress.value = 55 + percent
+        
+        progressText.value = `IA: ${queueStats.value.plantsProcessed}/${queueStats.value.totalPlants} plantas (${currentBatches}/${totalBatches} lotes, ${queueStats.value.cached} cache)`
+        
+        // Save progress periodically
+        if (progressData.completed % 5 === 0) {
+          cacheManager.saveProgress(sessionId.value, {
+            completed: progressData.completed,
+            total: progressData.total,
+            cached: queueStats.value.cached,
+            errors: progressData.errors,
+            timestamp: Date.now()
+          })
+        }
+      }
+      
+      requestQueue.onComplete = () => {
+        console.log('✅ Queue processing completed')
+        progressText.value = 'Processamento IA concluído!'
+        
+        // Clear progress after successful completion
+        cacheManager.clearProgress(sessionId.value)
+      }
+      
+      requestQueue.onError = (errorData) => {
+        console.error(`❌ Request failed after ${errorData.retries} retries:`, errorData.id)
+      }
+      
       // Process each AI column
       for (const aiCol of aiColumns) {
         console.log(`🤖 Processando coluna IA: ${aiCol.name}`)
         console.log(`📝 Prompt template: ${aiCol.aiPrompt}`)
         
-        let processedCount = 0
         let skippedCount = 0
+        const batchSize = 10 // Process 10 rows per batch to optimize API usage
+        const rowsToProcess = []
         
-        // Process each row
+        // First pass: collect rows that need processing
         for (let i = 0; i < finalData.length; i++) {
           const row = finalData[i]
           
-          // Skip if cell already has content (for updating existing spreadsheets)
-          if (row[aiCol.name] && row[aiCol.name].trim() !== '') {
-            console.log(`⊙ Linha ${i + 1} pulada (já tem conteúdo)`)
+          // Skip if cell already has content (handle non-string values safely)
+          const cellValue = row[aiCol.name]
+          const hasContent = cellValue !== null && cellValue !== undefined && String(cellValue).trim() !== ''
+          
+          if (hasContent) {
+            if (i < 5) console.log(`⊙ Linha ${i + 1} pulada (já tem conteúdo)`)
             skippedCount++
             continue
           }
           
           // Check if any referenced columns have missing data
-          console.log(`\n📋 Linha ${i + 1}: Analisando prompt...`)
-          console.log(`📝 Prompt template: "${aiCol.aiPrompt}"`)
-          
-          // Log available columns for debugging
-          if (i === 0) {
-            console.log(`📊 Colunas disponíveis na linha:`, Object.keys(row))
-            console.log(`📊 Mapeamento displayName -> originalName:`, displayToOriginalMap)
-          }
-          
-          let hasAllData = true
           const matches = aiCol.aiPrompt.match(/\{([^}]+)\}/g)
           const columnValues = {}
+          let hasAllData = true
           
           if (matches) {
-            console.log(`🔍 Colunas referenciadas no prompt: ${matches.join(', ')}`)
-            
             for (const match of matches) {
               const colName = match.slice(1, -1).trim()
               
               // Try to find value with various strategies
               let value = ''
-              let foundIn = ''
               
               // Strategy 1: Direct match
               if (row[colName] !== undefined && row[colName] !== null && row[colName] !== '') {
                 value = row[colName]
-                foundIn = 'direto'
               } 
               // Strategy 2: Display to original mapping
               else if (displayToOriginalMap[colName] && row[displayToOriginalMap[colName]] !== undefined && row[displayToOriginalMap[colName]] !== null && row[displayToOriginalMap[colName]] !== '') {
                 value = row[displayToOriginalMap[colName]]
-                foundIn = `mapeado de "${displayToOriginalMap[colName]}"`
               }
-              // Strategy 3: Case-insensitive search with trimmed names
+              // Strategy 3: Case-insensitive search
               else {
                 const normalizedColName = colName.toLowerCase().trim()
                 for (const [key, val] of Object.entries(row)) {
                   const normalizedKey = key.toLowerCase().trim()
                   if (normalizedKey === normalizedColName && val !== undefined && val !== null && val !== '') {
                     value = val
-                    foundIn = `encontrado via busca (coluna original: "${key}")`
                     break
                   }
                 }
               }
               
+              // Convert to string safely (handle objects, arrays, etc.)
+              if (typeof value === 'object' && value !== null) {
+                value = JSON.stringify(value)
+              } else {
+                value = String(value)
+              }
+              
               columnValues[colName] = value
               
-              // Log the value found (or not found)
               if (value === '' || value === null || value === undefined) {
-                console.log(`   ❌ {${colName}}: VAZIO/NÃO ENCONTRADO`)
                 hasAllData = false
-              } else {
-                console.log(`   ✓ {${colName}}: "${value}" (${foundIn})`)
               }
             }
           }
           
           // Skip this row if any referenced column has missing data
           if (!hasAllData) {
-            console.log(`⊘ Linha ${i + 1} pulada (dados faltando)\n`)
+            if (i < 5) console.log(`⊘ Linha ${i + 1} pulada (dados faltando)`)
             finalData[i][aiCol.name] = ''
             skippedCount++
             continue
           }
           
-          // Replace placeholders in prompt with actual values
+          // Build individual prompt
           let prompt = aiCol.aiPrompt
-          
           if (matches) {
             matches.forEach(match => {
               const colName = match.slice(1, -1).trim()
-              const value = columnValues[colName] || ''
+              const value = String(columnValues[colName] || '')
               prompt = prompt.replace(match, value)
             })
           }
           
-          console.log(`🔄 Prompt final completo:\n"${prompt}"`)
+          // Check cache first
+          const cacheKey = cacheManager.generateCacheKey(prompt, row)
+          const cachedResponse = cacheManager.get(cacheKey)
           
-          // Update progress
-          const rowProgress = ((i + 1) / finalData.length) * 20 // 20% of progress bar for AI
-          progress.value = 60 + rowProgress
-          progressText.value = `IA processando linha ${i + 1}/${finalData.length} da coluna "${aiCol.name}"...`
-          
-          try {
-            console.log(`⏳ Chamando Gemini API para linha ${i + 1}...`)
-            const startTime = Date.now()
-            const result = await callGeminiAPI(prompt, apiKey)
-            const elapsed = Date.now() - startTime
-            finalData[i][aiCol.name] = result.trim()
-            console.log(`✓ Linha ${i + 1} processada em ${elapsed}ms`)
-            console.log(`📄 Resposta: ${result.substring(0, 100)}...`)
-            processedCount++
-          } catch (error) {
-            console.error(`✗ Erro na linha ${i + 1}:`, error)
-            finalData[i][aiCol.name] = `[Erro: ${error.message}]`
+          if (cachedResponse) {
+            finalData[i][aiCol.name] = cachedResponse
+            queueStats.value.cached++
+            if (i < 5) console.log(`💾 Linha ${i + 1} usando cache`)
+            continue
           }
           
-          // Small delay to avoid rate limiting
-          await new Promise(resolve => setTimeout(resolve, 500))
+          // Add to batch
+          rowsToProcess.push({
+            rowIndex: i,
+            prompt,
+            columnValues,
+            cacheKey
+          })
         }
         
-        console.log(`📊 Coluna "${aiCol.name}" concluída: ${processedCount} processadas, ${skippedCount} puladas`)
+        // Process in batches
+        for (let batchStart = 0; batchStart < rowsToProcess.length; batchStart += batchSize) {
+          const batch = rowsToProcess.slice(batchStart, batchStart + batchSize)
+          const batchEnd = Math.min(batchStart + batchSize, rowsToProcess.length)
+          
+          console.log(`📦 Criando lote ${Math.floor(batchStart / batchSize) + 1}: linhas ${batch[0].rowIndex + 1} a ${batch[batch.length - 1].rowIndex + 1}`)
+          
+          // Create batched prompt
+          let batchedPrompt = ''
+          
+          if (batch.length === 1) {
+            // Single item, use original prompt
+            batchedPrompt = batch[0].prompt
+          } else {
+            // Multiple items, create structured batch prompt
+            const basePromptText = aiCol.aiPrompt.replace(/\{[^}]+\}/g, '').trim()
+            
+            batchedPrompt = `Responda no formato JSON array. Para cada planta abaixo, crie a descrição solicitada. Retorne APENAS um array JSON sem texto adicional.\n\n`
+            batchedPrompt += `Instruções: ${basePromptText}\n\n`
+            batchedPrompt += `Plantas:\n`
+            
+            batch.forEach((item, idx) => {
+              const plantInfo = Object.entries(item.columnValues)
+                .map(([key, value]) => {
+                  // Ensure value is a string
+                  const stringValue = typeof value === 'object' && value !== null 
+                    ? JSON.stringify(value) 
+                    : String(value)
+                  return `${key}: ${stringValue}`
+                })
+                .join(', ')
+              batchedPrompt += `${idx + 1}. ${plantInfo}\n`
+            })
+            
+            batchedPrompt += `\nRetorne array JSON: ["descrição planta 1", "descrição planta 2", ...]`
+          }
+          
+          // Add batch to queue
+          const batchId = `batch_${aiCol.name}_${batchStart}_${batchEnd}`
+          requestQueue.addRequest(
+            batchId,
+            async () => {
+              console.log(`🚀 Processando lote com ${batch.length} itens...`)
+              const result = await callGeminiAPI(batchedPrompt, apiKey)
+              
+              let responses = []
+              if (batch.length === 1) {
+                responses = [result.trim()]
+              } else {
+                // Parse JSON response
+                try {
+                  // Try to extract JSON array from response
+                  const jsonMatch = result.match(/\[[\s\S]*\]/)
+                  if (jsonMatch) {
+                    responses = JSON.parse(jsonMatch[0])
+                  } else {
+                    // Fallback: split by lines or numbers
+                    const lines = result.split(/\n\d+\.|PLANTA \d+:/).filter(l => l.trim())
+                    responses = lines.map(l => l.trim().replace(/^["']|["']$/g, ''))
+                  }
+                  
+                  // Ensure we have enough responses
+                  if (responses.length < batch.length) {
+                    console.warn(`⚠️ Resposta incompleta: esperado ${batch.length}, recebido ${responses.length}`)
+                    // Pad with empty strings
+                    while (responses.length < batch.length) {
+                      responses.push('[Resposta incompleta]')
+                    }
+                  }
+                } catch (parseError) {
+                  console.error('❌ Erro ao parsear resposta JSON:', parseError)
+                  // Fallback: use full response for all items
+                  responses = batch.map(() => result.trim())
+                }
+              }
+              
+              // Store results and cache
+              batch.forEach((item, idx) => {
+                const response = responses[idx] || '[Erro ao processar]'
+                finalData[item.rowIndex][aiCol.name] = response
+                
+                // Cache individual response
+                cacheManager.set(item.cacheKey, response, {
+                  rowIndex: item.rowIndex,
+                  columnName: aiCol.name,
+                  batchId
+                })
+                
+                // Update plants processed count
+                queueStats.value.plantsProcessed++
+              })
+              
+              return `Batch processed: ${batch.length} items`
+            },
+            0
+          )
+          
+          queueStats.value.queued++
+        }
+        
+        queueStats.value.totalPlants = finalData.length
+        queueStats.value.plantsProcessed = queueStats.value.cached
+        
+        console.log(`📊 Coluna "${aiCol.name}": ${skippedCount} puladas, ${queueStats.value.cached} em cache, ${rowsToProcess.length} para processar em ${Math.ceil(rowsToProcess.length / batchSize)} lotes`)
       }
+      
+      // Start queue processing
+      if (requestQueue.queue.length > 0) {
+        console.log(`🚀 Iniciando fila com ${requestQueue.queue.length} requisições`)
+        progressText.value = `Processando ${requestQueue.queue.length} requisições (máx 15/min)...`
+        await requestQueue.start()
+      } else {
+        console.log('✓ Nenhuma requisição necessária (todas em cache ou puladas)')
+      }
+      
+      progress.value = 85
     }
     
     // Now filter to selected columns only for final export
@@ -564,5 +789,37 @@ h3 {
   text-align: center;
   color: #666;
   font-weight: 500;
+}
+
+.queue-stats {
+  display: flex;
+  justify-content: center;
+  gap: 2rem;
+  margin-top: 1rem;
+  padding: 1rem;
+  background-color: #f8f9fa;
+  border-radius: 8px;
+}
+
+.stat-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.stat-label {
+  font-size: 0.9rem;
+  color: #666;
+}
+
+.stat-value {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: #28a745;
+}
+
+.stat-value.error {
+  color: #dc3545;
 }
 </style>

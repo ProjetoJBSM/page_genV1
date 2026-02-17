@@ -175,7 +175,13 @@ const processedData = computed(() => {
             enhanced[col.name] = col.value || ''
             break
           case 'sequence':
-            enhanced[col.name] = (col.sequenceStart || 1) + index
+            const seqValue = (col.sequenceStart || 1) + index
+            // Apply padding if specified
+            if (col.sequencePadding && col.sequencePadding > 0) {
+              enhanced[col.name] = seqValue.toString().padStart(col.sequencePadding, '0')
+            } else {
+              enhanced[col.name] = seqValue
+            }
             break
           case 'date':
             const now = new Date()
@@ -195,8 +201,27 @@ const processedData = computed(() => {
             break
           case 'formula':
             // Formula replacement: {columnName} gets replaced with column value
-            // Everything else (including + or any text) is kept as-is
+            // Supports functions like {padLeft(columnName, length)}
             let formula = col.formula || ''
+            
+            // Handle padLeft function: {padLeft(columnName, length)}
+            const padLeftRegex = /\{padLeft\(([^,]+),\s*(\d+)\)\}/g
+            formula = formula.replace(padLeftRegex, (match, colName, length) => {
+              const trimmedColName = colName.trim()
+              let value = ''
+              
+              // Try to find value using same strategy as regular columns
+              if (row[trimmedColName] !== undefined) {
+                value = row[trimmedColName]
+              } else if (displayToOriginalMap[trimmedColName] && row[displayToOriginalMap[trimmedColName]] !== undefined) {
+                value = row[displayToOriginalMap[trimmedColName]]
+              }
+              
+              // Convert to string and pad
+              return String(value || '').padStart(parseInt(length), '0')
+            })
+            
+            // Regular formula processing
             
             // Find all {columnName} patterns
             const matches = formula.match(/\{([^}]+)\}/g)
@@ -310,7 +335,13 @@ const fullProcessedData = computed(() => {
             enhanced[col.name] = col.value || ''
             break
           case 'sequence':
-            enhanced[col.name] = (col.sequenceStart || 1) + index
+            const seqValue = (col.sequenceStart || 1) + index
+            // Apply padding if specified
+            if (col.sequencePadding && col.sequencePadding > 0) {
+              enhanced[col.name] = seqValue.toString().padStart(col.sequencePadding, '0')
+            } else {
+              enhanced[col.name] = seqValue
+            }
             break
           case 'date':
             const now = new Date()
@@ -329,7 +360,28 @@ const fullProcessedData = computed(() => {
             }
             break
           case 'formula':
+            // Formula replacement: {columnName} gets replaced with column value
+            // Supports functions like {padLeft(columnName, length)}
             let formula = col.formula || ''
+            
+            // Handle padLeft function: {padLeft(columnName, length)}
+            const padLeftRegex = /\{padLeft\(([^,]+),\s*(\d+)\)\}/g
+            formula = formula.replace(padLeftRegex, (match, colName, length) => {
+              const trimmedColName = colName.trim()
+              let value = ''
+              
+              // Try to find value using same strategy as regular columns
+              if (row[trimmedColName] !== undefined) {
+                value = row[trimmedColName]
+              } else if (displayToOriginalMap[trimmedColName] && row[displayToOriginalMap[trimmedColName]] !== undefined) {
+                value = row[displayToOriginalMap[trimmedColName]]
+              }
+              
+              // Convert to string and pad
+              return String(value || '').padStart(parseInt(length), '0')
+            })
+            
+            // Regular column replacement: {columnName}
             const matches = formula.match(/\{([^}]+)\}/g)
             if (matches) {
               matches.forEach(match => {
