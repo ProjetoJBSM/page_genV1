@@ -1,10 +1,10 @@
 /**
  * Request Queue Manager
- * Handles batching and rate limiting of API requests to avoid hitting the 15 req/min limit
+ * Handles batching and rate limiting of API requests with configurable limits
  */
 
 export class RequestQueue {
-  constructor(maxRequestsPerMinute = 15, delayBetweenRequests = 5000) {
+  constructor(maxRequestsPerMinute = 2000, delayBetweenRequests = 100) {
     this.maxRequestsPerMinute = maxRequestsPerMinute
     this.delayBetweenRequests = delayBetweenRequests // Delay in ms between requests
     this.queue = []

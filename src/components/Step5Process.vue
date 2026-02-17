@@ -279,8 +279,9 @@ const processData = async () => {
       // Generate session ID for progress tracking
       sessionId.value = `session_${Date.now()}`
       
-      // Initialize request queue with 15 requests per minute limit and 5 second delay between batches
-      requestQueue = new RequestQueue(15, 5000)
+      // Initialize request queue with high rate limit (2000 req/min, 100ms delay)
+      // Gemini API free tier: 4K req/min, 4M tokens/min
+      requestQueue = new RequestQueue(2000, 100)
       
       // Set up queue callbacks
       requestQueue.onProgress = (progressData) => {
@@ -324,7 +325,7 @@ const processData = async () => {
         console.log(`📝 Prompt template: ${aiCol.aiPrompt}`)
         
         let skippedCount = 0
-        const batchSize = 10 // Process 10 rows per batch to optimize API usage
+        const batchSize = 25 // Process 25 rows per batch to optimize API usage and reduce total requests
         const rowsToProcess = []
         
         // First pass: collect rows that need processing
@@ -341,14 +342,15 @@ const processData = async () => {
             continue
           }
           
-          // Check if any referenced columns have missing data
+          // Extract column values for prompt (allows optional/blank columns)
           const matches = aiCol.aiPrompt.match(/\{([^}]+)\}/g)
           const columnValues = {}
-          let hasAllData = true
+          const referencedColumns = new Set() // Track which columns are actually used in prompt
           
           if (matches) {
             for (const match of matches) {
               const colName = match.slice(1, -1).trim()
+              referencedColumns.add(colName)
               
               // Try to find value with various strategies
               let value = ''
@@ -375,28 +377,17 @@ const processData = async () => {
               
               // Convert to string safely (handle objects, arrays, etc.)
               if (typeof value === 'object' && value !== null) {
+                console.warn(`⚠️ Coluna "${colName}" contém objeto, convertendo para JSON:`, value)
                 value = JSON.stringify(value)
               } else {
                 value = String(value)
               }
               
               columnValues[colName] = value
-              
-              if (value === '' || value === null || value === undefined) {
-                hasAllData = false
-              }
             }
           }
           
-          // Skip this row if any referenced column has missing data
-          if (!hasAllData) {
-            if (i < 5) console.log(`⊘ Linha ${i + 1} pulada (dados faltando)`)
-            finalData[i][aiCol.name] = ''
-            skippedCount++
-            continue
-          }
-          
-          // Build individual prompt
+          // Build individual prompt (blank columns are replaced with empty string)
           let prompt = aiCol.aiPrompt
           if (matches) {
             matches.forEach(match => {
@@ -405,6 +396,22 @@ const processData = async () => {
               prompt = prompt.replace(match, value)
             })
           }
+          
+          // Clean up multiple consecutive spaces (from blank columns)
+          prompt = prompt.replace(/\s{2,}/g, ' ').trim()
+          
+          // Skip if prompt has no actual data (all columns were empty)
+          // Check if all referenced values are empty
+          const hasAnyData = Object.values(columnValues).some(val => val !== '' && val !== null && val !== undefined)
+          if (!hasAnyData) {
+            if (i < 5) console.log(`⊘ Linha ${i + 1} pulada (todas as colunas vazias)`)
+            finalData[i][aiCol.name] = ''
+            skippedCount++
+            continue
+          }
+          
+          // Debug: Log prompts for first few rows
+          if (i < 3) console.log(`📝 Linha ${i + 1} prompt: "${prompt}"`)
           
           // Check cache first
           const cacheKey = cacheManager.generateCacheKey(prompt, row)
@@ -421,17 +428,36 @@ const processData = async () => {
           rowsToProcess.push({
             rowIndex: i,
             prompt,
-            columnValues,
-            cacheKey
+            columnValues, // Only contains columns referenced in prompt
+            cacheKey,
+            promptNormalized: prompt.toLowerCase().trim() // For grouping identical prompts
           })
         }
         
-        // Process in batches
-        for (let batchStart = 0; batchStart < rowsToProcess.length; batchStart += batchSize) {
-          const batch = rowsToProcess.slice(batchStart, batchStart + batchSize)
-          const batchEnd = Math.min(batchStart + batchSize, rowsToProcess.length)
+        // Sort rows by normalized prompt to group identical species together
+        // This ensures consistent AI responses for the same species
+        rowsToProcess.sort((a, b) => a.promptNormalized.localeCompare(b.promptNormalized))
+        
+        // Build a map of unique prompts to avoid duplicate API calls
+        const promptToRows = new Map()
+        rowsToProcess.forEach(item => {
+          if (!promptToRows.has(item.promptNormalized)) {
+            promptToRows.set(item.promptNormalized, [])
+          }
+          promptToRows.get(item.promptNormalized).push(item)
+        })
+        
+        console.log(`📊 ${rowsToProcess.length} linhas para processar, ${promptToRows.size} prompts únicos`)
+        
+        // Create deduplicated list (one representative per unique prompt)
+        const uniqueRowsToProcess = Array.from(promptToRows.values()).map(rows => rows[0])
+        
+        // Process in batches (using unique prompts only)
+        for (let batchStart = 0; batchStart < uniqueRowsToProcess.length; batchStart += batchSize) {
+          const batch = uniqueRowsToProcess.slice(batchStart, batchStart + batchSize)
+          const batchEnd = Math.min(batchStart + batchSize, uniqueRowsToProcess.length)
           
-          console.log(`📦 Criando lote ${Math.floor(batchStart / batchSize) + 1}: linhas ${batch[0].rowIndex + 1} a ${batch[batch.length - 1].rowIndex + 1}`)
+          console.log(`📦 Criando lote ${Math.floor(batchStart / batchSize) + 1}: ${batch.length} prompts únicos (${batch.map(b => promptToRows.get(b.promptNormalized).length).reduce((a, c) => a + c, 0)} linhas totais)`)
           
           // Create batched prompt
           let batchedPrompt = ''
@@ -449,6 +475,8 @@ const processData = async () => {
             
             batch.forEach((item, idx) => {
               const plantInfo = Object.entries(item.columnValues)
+                // Filter out blank values
+                .filter(([key, value]) => value !== '' && value !== null && value !== undefined)
                 .map(([key, value]) => {
                   // Ensure value is a string
                   const stringValue = typeof value === 'object' && value !== null 
@@ -480,8 +508,17 @@ const processData = async () => {
                   // Try to extract JSON array from response
                   const jsonMatch = result.match(/\[[\s\S]*\]/)
                   if (jsonMatch) {
-                    responses = JSON.parse(jsonMatch[0])
+                    const parsed = JSON.parse(jsonMatch[0])
+                    // Ensure all items are strings
+                    responses = parsed.map(item => {
+                      if (typeof item === 'object' && item !== null) {
+                        console.warn('⚠️ Resposta contém objeto, convertendo:', item)
+                        return JSON.stringify(item)
+                      }
+                      return String(item || '')
+                    })
                   } else {
+                    console.warn('⚠️ Nenhum JSON array encontrado na resposta')
                     // Fallback: split by lines or numbers
                     const lines = result.split(/\n\d+\.|PLANTA \d+:/).filter(l => l.trim())
                     responses = lines.map(l => l.trim().replace(/^["']|["']$/g, ''))
@@ -490,35 +527,52 @@ const processData = async () => {
                   // Ensure we have enough responses
                   if (responses.length < batch.length) {
                     console.warn(`⚠️ Resposta incompleta: esperado ${batch.length}, recebido ${responses.length}`)
-                    // Pad with empty strings
+                    console.warn('⚠️ Resposta original:', result.substring(0, 500))
+                    // Pad with placeholders
                     while (responses.length < batch.length) {
-                      responses.push('[Resposta incompleta]')
+                      responses.push('[Resposta incompleta - tente processar novamente]')
                     }
                   }
                 } catch (parseError) {
                   console.error('❌ Erro ao parsear resposta JSON:', parseError)
-                  // Fallback: use full response for all items
-                  responses = batch.map(() => result.trim())
+                  console.error('❌ Resposta original:', result.substring(0, 500))
+                  // Fallback: use full response for first item, placeholders for rest
+                  responses = [result.trim()]
+                  while (responses.length < batch.length) {
+                    responses.push('[Erro ao processar - tente novamente]')
+                  }
                 }
               }
               
-              // Store results and cache
+              // Store results and cache (apply to ALL rows with same prompt)
               batch.forEach((item, idx) => {
                 const response = responses[idx] || '[Erro ao processar]'
-                finalData[item.rowIndex][aiCol.name] = response
                 
-                // Cache individual response
-                cacheManager.set(item.cacheKey, response, {
-                  rowIndex: item.rowIndex,
-                  columnName: aiCol.name,
-                  batchId
+                // Get ALL rows with this same prompt
+                const duplicateRows = promptToRows.get(item.promptNormalized)
+                
+                // Apply the same response to all duplicate rows
+                duplicateRows.forEach(duplicateItem => {
+                  finalData[duplicateItem.rowIndex][aiCol.name] = response
+                  
+                  // Cache individual response
+                  cacheManager.set(duplicateItem.cacheKey, response, {
+                    rowIndex: duplicateItem.rowIndex,
+                    columnName: aiCol.name,
+                    batchId
+                  })
+                  
+                  // Update plants processed count
+                  queueStats.value.plantsProcessed++
                 })
                 
-                // Update plants processed count
-                queueStats.value.plantsProcessed++
+                if (duplicateRows.length > 1) {
+                  console.log(`✓ Resposta aplicada a ${duplicateRows.length} linhas idênticas`)
+                }
               })
               
-              return `Batch processed: ${batch.length} items`
+              const totalRowsProcessed = batch.reduce((sum, item) => sum + promptToRows.get(item.promptNormalized).length, 0)
+              return `Batch processed: ${batch.length} unique prompts, ${totalRowsProcessed} total rows`
             },
             0
           )
@@ -529,13 +583,13 @@ const processData = async () => {
         queueStats.value.totalPlants = finalData.length
         queueStats.value.plantsProcessed = queueStats.value.cached
         
-        console.log(`📊 Coluna "${aiCol.name}": ${skippedCount} puladas, ${queueStats.value.cached} em cache, ${rowsToProcess.length} para processar em ${Math.ceil(rowsToProcess.length / batchSize)} lotes`)
+        console.log(`📊 Coluna "${aiCol.name}": ${skippedCount} puladas, ${queueStats.value.cached} em cache, ${rowsToProcess.length} linhas (${uniqueRowsToProcess.length} únicas) para processar em ${Math.ceil(uniqueRowsToProcess.length / batchSize)} lotes`)
       }
       
       // Start queue processing
       if (requestQueue.queue.length > 0) {
         console.log(`🚀 Iniciando fila com ${requestQueue.queue.length} requisições`)
-        progressText.value = `Processando ${requestQueue.queue.length} requisições (máx 15/min)...`
+        progressText.value = `Processando ${requestQueue.queue.length} requisições (máx 2000/min)...`
         await requestQueue.start()
       } else {
         console.log('✓ Nenhuma requisição necessária (todas em cache ou puladas)')
@@ -585,8 +639,13 @@ const processData = async () => {
     
     console.log('✅ CSV gerado, tamanho:', csv.length, 'caracteres')
     
+    // Add UTF-8 BOM (Byte Order Mark) so Excel recognizes UTF-8 encoding
+    // This prevents encoding issues with accented characters
+    const BOM = '\uFEFF'
+    const csvWithBOM = BOM + csv
+    
     // Create blob and download URL
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
+    const blob = new Blob([csvWithBOM], { type: 'text/csv;charset=utf-8;' })
     const url = URL.createObjectURL(blob)
     
     downloadUrl.value = url

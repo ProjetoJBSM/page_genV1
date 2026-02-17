@@ -39,3 +39,6 @@ coverage
 
 # Vitest
 __screenshots__/
+
+# CSV de dados
+/public/dados.csv

@@ -83,24 +83,54 @@ const handleCsvUpload = async (event) => {
   if (!file) return
   
   console.log('📄 CSV Upload iniciado:', file.name)
+  
+  // Clear previous data immediately
   csvFileName.value = file.name
+  csvData.value = []
   errorMessage.value = ''
   
   try {
-    const text = await file.text()
+    // Read file with encoding detection
+    let text = ''
+    
+    // Try to detect encoding by checking first bytes for BOM
+    const arrayBuffer = await file.arrayBuffer()
+    const uint8Array = new Uint8Array(arrayBuffer)
+    
+    // Check for UTF-8 BOM (EF BB BF)
+    if (uint8Array.length >= 3 && uint8Array[0] === 0xEF && uint8Array[1] === 0xBB && uint8Array[2] === 0xBF) {
+      console.log('🔍 Detectado UTF-8 BOM')
+      // Decode as UTF-8 and remove BOM
+      const decoder = new TextDecoder('utf-8')
+      text = decoder.decode(uint8Array.slice(3))
+    } else {
+      // Try UTF-8 first
+      try {
+        const decoder = new TextDecoder('utf-8', { fatal: true })
+        text = decoder.decode(uint8Array)
+        console.log('🔍 Lido como UTF-8')
+      } catch (e) {
+        // If UTF-8 fails, try Windows-1252 (common for Excel)
+        console.log('🔍 UTF-8 falhou, tentando Windows-1252')
+        const decoder = new TextDecoder('windows-1252')
+        text = decoder.decode(uint8Array)
+      }
+    }
+    
     console.log('📄 Arquivo lido, tamanho:', text.length, 'caracteres')
     
-    // Parse CSV with PapaCSV
+    // Parse CSV with PapaCSV (auto-detects delimiter: comma, semicolon, tab, etc.)
     Papa.parse(text, {
       header: true,
       skipEmptyLines: 'greedy',
-      delimiter: ',',
+      // delimiter auto-detected by PapaCSV
       quoteChar: '"',
       escapeChar: '"',
       dynamicTyping: false,  // Keep all values as strings to preserve formatting
       trimHeaders: true,
       complete: (results) => {
         console.log('✅ CSV parseado com sucesso')
+        console.log('📊 Delimitador detectado:', results.meta.delimiter === ',' ? 'vírgula (,)' : results.meta.delimiter === ';' ? 'ponto e vírgula (;)' : results.meta.delimiter === '\t' ? 'tab' : results.meta.delimiter)
         console.log('📊 Colunas encontradas:', results.meta.fields)
         console.log('📊 Total de colunas:', results.meta.fields.length)
         console.log('📊 Total de linhas:', results.data.length)
@@ -205,6 +235,11 @@ const handleCsvUpload = async (event) => {
           fileName: file.name,
           rawText: text
         })
+        
+        // Reset file input to allow re-uploading the same file
+        if (event.target) {
+          event.target.value = ''
+        }
       },
       error: (error) => {
         console.error('❌ Erro ao parsear CSV:', error)
@@ -214,6 +249,10 @@ const handleCsvUpload = async (event) => {
   } catch (error) {
     console.error('❌ Erro no upload do CSV:', error)
     errorMessage.value = 'Erro ao carregar arquivo CSV: ' + error.message
+    // Reset file input on error too
+    if (event.target) {
+      event.target.value = ''
+    }
   }
 }
 
@@ -223,6 +262,9 @@ const loadFromSheets = async () => {
   console.log('🔗 Iniciando carregamento do Google Sheets')
   console.log('🔗 URL original:', sheetsUrl.value)
   
+  // Clear previous data immediately
+  csvData.value = []
+  csvFileName.value = ''
   isLoading.value = true
   errorMessage.value = ''
   
@@ -252,20 +294,43 @@ const loadFromSheets = async () => {
       throw new Error(`Erro ao acessar o Google Sheets: ${response.status} ${response.statusText}`)
     }
     
-    const text = await response.text()
+    // Read response with encoding detection
+    const arrayBuffer = await response.arrayBuffer()
+    const uint8Array = new Uint8Array(arrayBuffer)
+    
+    let text = ''
+    // Check for UTF-8 BOM (EF BB BF)
+    if (uint8Array.length >= 3 && uint8Array[0] === 0xEF && uint8Array[1] === 0xBB && uint8Array[2] === 0xBF) {
+      console.log('🔍 Detectado UTF-8 BOM no Google Sheets')
+      const decoder = new TextDecoder('utf-8')
+      text = decoder.decode(uint8Array.slice(3))
+    } else {
+      // Google Sheets usually returns UTF-8, but fallback to Windows-1252 if needed
+      try {
+        const decoder = new TextDecoder('utf-8', { fatal: true })
+        text = decoder.decode(uint8Array)
+        console.log('🔍 Google Sheets lido como UTF-8')
+      } catch (e) {
+        console.log('🔍 UTF-8 falhou, tentando Windows-1252')
+        const decoder = new TextDecoder('windows-1252')
+        text = decoder.decode(uint8Array)
+      }
+    }
+    
     console.log('✅ Dados recebidos, tamanho:', text.length, 'caracteres')
     
-    // Parse the CSV data
+    // Parse the CSV data (auto-detects delimiter: comma, semicolon, tab, etc.)
     Papa.parse(text, {
       header: true,
       skipEmptyLines: 'greedy',
-      delimiter: ',',
+      // delimiter auto-detected by PapaCSV
       quoteChar: '"',
       escapeChar: '"',
       dynamicTyping: false,  // Keep all values as strings to preserve formatting
       trimHeaders: true,
       complete: (results) => {
         console.log('✅ Google Sheets CSV parseado com sucesso')
+        console.log('📊 Delimitador detectado:', results.meta.delimiter === ',' ? 'vírgula (,)' : results.meta.delimiter === ';' ? 'ponto e vírgula (;)' : results.meta.delimiter === '\t' ? 'tab' : results.meta.delimiter)
         console.log('📊 Colunas encontradas:', results.meta.fields)
         console.log('📊 Total de linhas:', results.data.length)
         console.log('📊 Primeiras 3 linhas:', results.data.slice(0, 3))

@@ -321,7 +321,26 @@ const getFormulaPreview = (formula) => {
   }
   
   let preview = formula
-  const matches = formula.match(/\{([^}]+)\}/g)
+  
+  // Handle padLeft function: {padLeft(columnName, length)}
+  const padLeftRegex = /\{padLeft\(([^,]+),\s*(\d+)\)\}/g
+  preview = preview.replace(padLeftRegex, (match, colName, length) => {
+    const trimmedColName = colName.trim()
+    let value = '[não encontrado]'
+    
+    // Try to find value using same strategy as regular columns
+    if (props.sampleRow[trimmedColName] !== undefined) {
+      value = props.sampleRow[trimmedColName]
+    } else if (displayToOriginalMap[trimmedColName] && props.sampleRow[displayToOriginalMap[trimmedColName]] !== undefined) {
+      value = props.sampleRow[displayToOriginalMap[trimmedColName]]
+    }
+    
+    // Convert to string and pad
+    return String(value || '').padStart(parseInt(length), '0')
+  })
+  
+  // Handle regular {columnName} patterns
+  const matches = preview.match(/\{([^}]+)\}/g)
   
   if (matches) {
     matches.forEach(match => {
